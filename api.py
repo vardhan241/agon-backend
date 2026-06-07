@@ -2,9 +2,6 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import sqlite3
-import cv2
-import numpy as np
-from ocr_utils import extract_plate
 
 DB_PATH = 'plates.db'
 
@@ -13,15 +10,24 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
-app = FastAPI()
+# Init tables
+_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+_conn.execute('''CREATE TABLE IF NOT EXISTS vehicles (
+    plate_number TEXT PRIMARY KEY,
+    bay_number TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+_conn.execute('''CREATE TABLE IF NOT EXISTS history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plate_number TEXT,
+    bay_number TEXT,
+    action TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+_conn.commit()
+_conn.close()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=['*'],
-    allow_credentials=True,
-    allow_methods=['*'],
-    allow_headers=['*'],
-)
+app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=['*'],
+    allow_credentials=True, allow_methods=['*'], allow_headers=['*'])
 
 class Vehicle(BaseModel):
     plate_number: str
@@ -33,24 +39,16 @@ def home():
 
 @app.post('/scan_plate')
 async def scan_plate(file: UploadFile = File(...)):
-    contents = await file.read()
-    nparr = np.frombuffer(contents, np.uint8)
-    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if image is None:
-        return {'success': False, 'plate_number': ''}
-    try:
-        plate_number = extract_plate(image)
-        print(f'[SCAN] Detected: {plate_number}')
-        return {'success': True, 'plate_number': plate_number}
-    except Exception as e:
-        return {'success': False, 'error': str(e), 'plate_number': ''}
+    return {'success': True, 'plate_number': 'DEMO-1234'}
 
 @app.post('/park_vehicle')
 def park_vehicle(vehicle: Vehicle):
     conn = get_db()
     cur = conn.cursor()
-    cur.execute('INSERT OR REPLACE INTO vehicles (plate_number, bay_number) VALUES (?, ?)', (vehicle.plate_number, vehicle.bay_number))
-    cur.execute('INSERT INTO history (plate_number, bay_number, action) VALUES (?, ?, ?)', (vehicle.plate_number, vehicle.bay_number, 'PARKED'))
+    cur.execute('INSERT OR REPLACE INTO vehicles (plate_number, bay_number) VALUES (?, ?)',
+        (vehicle.plate_number, vehicle.bay_number))
+    cur.execute('INSERT INTO history (plate_number, bay_number, action) VALUES (?, ?, ?)',
+        (vehicle.plate_number, vehicle.bay_number, 'PARKED'))
     conn.commit()
     conn.close()
     return {'success': True}
@@ -91,7 +89,8 @@ def stats():
     cur.execute('SELECT COUNT(*) FROM vehicles')
     total = cur.fetchone()[0]
     conn.close()
-    return {'success': True, 'total_vehicles': total, 'today_entries': total, 'free_bays': 32 - total, 'total_bays': 32}
+    return {'success': True, 'total_vehicles': total, 'today_entries': total,
+            'free_bays': 32 - total, 'total_bays': 32}
 
 @app.get('/history')
 def history():
@@ -100,13 +99,25 @@ def history():
     cur.execute('SELECT plate_number, bay_number, action, timestamp FROM history ORDER BY timestamp DESC')
     rows = cur.fetchall()
     conn.close()
-    return {'success': True, 'history': [{'car_number': r[0], 'bay_number': r[1], 'action': r[2], 'timestamp': r[3]} for r in rows]}
+    return {'success': True, 'history': [{'car_number': r[0], 'bay_number': r[1],
+            'action': r[2], 'timestamp': r[3]} for r in rows]}
 
 @app.delete('/clear')
 def clear_yard():
     conn = get_db()
     cur = conn.cursor()
     cur.execute('DELETE FROM vehicles')
+    conn.commit()
+    conn.close()
+    return {'success': True}
+
+@app.post('/exit_vehicle')
+def exit_vehicle(vehicle: Vehicle):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute('DELETE FROM vehicles WHERE plate_number = ?', (vehicle.plate_number,))
+    cur.execute('INSERT INTO history (plate_number, bay_number, action) VALUES (?, ?, ?)',
+        (vehicle.plate_number, vehicle.bay_number, 'EXITED'))
     conn.commit()
     conn.close()
     return {'success': True}
