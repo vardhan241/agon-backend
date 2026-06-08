@@ -29,7 +29,20 @@ def home():
 
 @app.post("/scan_plate")
 async def scan_plate(file: UploadFile = File(...)):
-    return {"success": True, "plate_number": "DEMO-1234"}
+    contents = await file.read()
+    nparr = np.frombuffer(contents, np.uint8)
+    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if image is None:
+        return {"success": False, "plate_number": ""}
+    try:
+        plate_number = extract_plate(image)
+        print(f"[SCAN] Detected: {plate_number}")
+        if plate_number:
+            return {"success": True, "plate_number": plate_number}
+        return {"success": False, "plate_number": ""}
+    except Exception as e:
+        print(f"[SCAN ERROR] {e}")
+        return {"success": False, "plate_number": ""}
 
 @app.post("/park_vehicle")
 def park_vehicle(vehicle: Vehicle):
