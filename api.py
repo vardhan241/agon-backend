@@ -1,53 +1,64 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import sqlite3
+import psycopg2, os
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 def db():
-    c = sqlite3.connect("plates.db", check_same_thread=False)
-    c.execute("CREATE TABLE IF NOT EXISTS vehicles (car_number TEXT PRIMARY KEY, bay_number TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)")
-    c.commit()
-    return c
+    return psycopg2.connect(os.environ["DATABASE_URL"])
 
-class Vehicle(BaseModel):
-    car_number: str
-    bay_number: str
+def init():
+    c = db()
+    c.cursor().execute("""CREATE TABLE IF NOT EXISTS vehicles (
+        car_number TEXT PRIMARY KEY, bay_number TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW())""")
+    c.commit()
+
+@app.on_event("startup")
+def startup(): init()
 
 @app.get("/")
 def root(): return {"status": "ANPR Running"}
 
-@app.post("/scan_plate")
-async def scan(file: UploadFile = File(...)): return {"success": True, "plate_number": "DEMO-1234"}
+class Vehicle(BaseModel):
+    car_number: str = ""
+    plate_number: str = ""
+    bay_number: str
 
 @app.post("/park_vehicle")
 def park(v: Vehicle):
-    c = db()
-    c.execute("INSERT OR REPLACE INTO vehicles (car_number, bay_number) VALUES (?,?)", (v.car_number.upper(), v.bay_number.upper()))
+    plate = (v.car_number or v.plate_number).upper()
+    if not plate: raise HTTPException(400, "No plate")
+    c = db(); cur = c.cursor()
+    cur.execute("INSERT INTO vehicles (car_number, bay_number) VALUES (%s,%s) ON CONFLICT (car_number) DO UPDATE SET bay_number=%s, updated_at=NOW()", (plate, v.bay_number.upper(), v.bay_number.upper()))
     c.commit()
     return {"success": True}
 
 @app.get("/vehicle/{plate}")
 def find(plate: str):
-    r = db().execute("SELECT car_number, bay_number FROM vehicles WHERE car_number=?", (plate.upper(),)).fetchone()
+    cur = db().cursor()
+    cur.execute("SELECT car_number, bay_number FROM vehicles WHERE car_number=%s", (plate.upper(),))
+    r = cur.fetchone()
     return {"found": bool(r), "car_number": r[0] if r else None, "bay_number": r[1] if r else None}
 
 @app.get("/vehicles")
 def vehicles():
-    rows = db().execute("SELECT car_number, bay_number, created_at FROM vehicles ORDER BY created_at DESC").fetchall()
-    return {"success": True, "vehicles": [{"car_number": r[0], "bay_number": r[1], "created_at": r[2]} for r in rows]}
+    cur = db().cursor()
+    cur.execute("SELECT car_number, bay_number, created_at FROM vehicles ORDER BY created_at DESC")
+    return {"success": True, "vehicles": [{"car_number": r[0], "bay_number": r[1], "created_at": str(r[2])} for r in cur.fetchall()]}
 
 @app.delete("/vehicle/{plate}")
 def delete(plate: str):
-    c = db(); c.execute("DELETE FROM vehicles WHERE car_number=?", (plate.upper(),)); c.commit()
+    c = db(); c.cursor().execute("DELETE FROM vehicles WHERE car_number=%s", (plate.upper(),)); c.commit()
     return {"success": True}
 
 @app.get("/stats")
 def stats():
-    total = db().execute("SELECT COUNT(*) FROM vehicles").fetchone()[0]
-    return {"success": True, "total_vehicles": total, "today_entries": total, "free_bays": 32-total, "total_bays": 32}
+    cur = db().cursor(); cur.execute("SELECT COUNT(*) FROM vehicles")
+    t = cur.fetchone()[0]
+    return {"success": True, "total_vehicles": t, "today_entries": t, "free_bays": 32-t, "total_bays": 32}
 
 @app.get("/history")
 def history(): return {"success": True, "history": []}
