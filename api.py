@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import psycopg2, os
+import psycopg2, os, base64, httpx
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -21,6 +21,28 @@ def startup(): init()
 
 @app.get("/")
 def root(): return {"status": "ANPR Running"}
+
+@app.post("/scan_plate")
+async def scan(file: UploadFile = File(...)):
+    try:
+        data = await file.read()
+        b64 = base64.b64encode(data).decode()
+        mime = file.content_type or "image/jpeg"
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                json={"model": "claude-haiku-4-5-20251001", "max_tokens": 50,
+                      "messages": [{"role": "user", "content": [
+                          {"type": "image", "source": {"type": "base64", "media_type": mime, "data": b64}},
+                          {"type": "text", "text": "Read the vehicle number plate. Reply with ONLY the plate number, no spaces or punctuation. Example: MH12AB1234"}
+                      ]}]}
+            )
+        plate = r.json()["content"][0]["text"].strip().upper().replace(" ", "").replace("-", "")
+        return {"success": True, "plate_number": plate}
+    except Exception as e:
+        return {"success": False, "plate_number": None, "error": str(e)}
 
 class Vehicle(BaseModel):
     car_number: str = ""
